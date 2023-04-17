@@ -1,82 +1,126 @@
+#include <lmic.h>
+#include <hal/hal.h>
 #include <SPI.h>
-#include <LoRaWAN.h>
-#include <Crypto.h>
-#include <PubSubClient.h>
+#include <AsyncMqttClient.h>
 
-// Настройки для TTN (The Things Network)
-static const uint8_t PROGMEM DEVEUI[8]={ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-static const uint8_t PROGMEM APPEUI[8]={ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-static const uint8_t PROGMEM APPKEY[16]={ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+// Replace with your TTN keys
+const char *devEui = "INSERT_DEV_EUI_HERE";
+const char *appEui = "INSERT_APP_EUI_HERE";
+const char *appKey = "INSERT_APP_KEY_HERE";
 
-// Настройки для LoRaWAN
-const uint8_t RX_TIMEOUT = 5; // Время ожидания приема данных в секундах
-uint8_t buffer[256]; // Буфер для принятых данных
+// Replace with your WiFi credentials
+const char *ssid = "INSERT_WIFI_SSID_HERE";
+const char *password = "INSERT_WIFI_PASSWORD_HERE";
 
-// Настройки для шифрования
-byte key[CryptoAES::BLOCKSIZE];
-byte iv[CryptoAES::BLOCKSIZE];
+// Replace with your MQTT broker IP address
+const char *mqttServer = "INSERT_MQTT_BROKER_IP_HERE";
+const uint16_t mqttPort = 1883;
+
+// Replace with your MQTT credentials
+const char *mqttUser = "INSERT_MQTT_USER_HERE";
+const char *mqttPassword = "INSERT_MQTT_PASSWORD_HERE";
+
+// MQTT topics to publish to
+const char *mqttTopic1 = "mytopic1";
+const char *mqttTopic2 = "mytopic2";
+
+// Pin mapping for LoRa module
+const lmic_pinmap lmic_pins = {
+  .nss = 10,
+  .rxtx = LMIC_UNUSED_PIN,
+  .rst = 9,
+  .dio = {2, 6, 7},
+};
+
+// Global variables for LoRaWAN
+static osjob_t sendjob;
+const uint8_t maxPayloadLength = 51;
+uint8_t payload[maxPayloadLength];
+uint8_t payloadSize = 0;
+
+// Create an instance of the AsyncMqttClient
+AsyncMqttClient mqttClient;
+
+// WiFi event handler
+void onWiFiConnect(WiFiEvent_t event) {
+  Serial.println("Connected to Wi-Fi.");
+}
+
+void onWiFiDisconnect(WiFiEvent_t event) {
+  Serial.println("Disconnected from Wi-Fi.");
+}
+
+void onMqttConnect(bool sessionPresent) {
+  Serial.println("Connected to MQTT broker.");
+  Serial.print("Session present: ");
+  Serial.println(sessionPresent);
+
+  // Subscribe to the MQTT topics
+  mqttClient.subscribe(mqttTopic1, 0);
+  mqttClient.subscribe(mqttTopic2, 0);
+}
+
+void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
+  Serial.println("Disconnected from MQTT broker.");
+}
+
+void onMqttMessage(char *topic, char *payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
+  Serial.println("Message received from MQTT broker:");
+  Serial.print("Topic: ");
+  Serial.println(topic);
+  Serial.print("Payload: ");
+  Serial.write((uint8_t*)payload, len);
+  Serial.println();
+}
+
+void do_send(osjob_t *j) {
+  // Create a buffer to store the LoRaWAN message
+  uint8_t buffer[maxPayloadLength];
+  memcpy(buffer, payload, payloadSize);
+  
+  // Prepare the LoRaWAN message
+  LMIC.frame[0] = 0x00;
+  LMIC.frame[1] = 0x00;
+  LMIC.frame[2] = 0x00;
+  LMIC.frame[3] = 0x00;
+  LMIC_setTxData2(1, buffer, payloadSize, 0);
+
+  Serial.println("Packet queued for transmission.");
+}
 
 void setup() {
-  // Настройка модуля sx1262
-  SPI.begin(5, 19, 27, 18);
-  LoRaWAN.init();
-  LoRaWAN.setDevEUI(DEVEUI);
-  LoRaWAN.setAppEUI(APPEUI);
-  LoRaWAN.setAppKey(APPKEY);
-  LoRaWAN.setSubBand(2);
-  LoRaWAN.setRxTimeout(RX_TIMEOUT);
-  LoRaWAN.join();
+  Serial.begin(115200);
 
-  // Генерация ключа и вектора инициализации для шифрования
-  // TODO: заменить на настоящие значения
-  memset(key, 0, CryptoAES::BLOCKSIZE);
-  memset(iv, 0, CryptoAES::BLOCKSIZE);
-}
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  Serial.println("Connecting to Wi-Fi...");
 
-// Настройки MQTT-брокера
-const char* mqttServer = "mqtt.server.com";
-const int mqttPort = 1883;
-const char* mqttUsername = "mqtt_username";
-const char* mqttPassword = "mqtt_password";
-const char* mqttClientId = "your_client_id";
-
-// Создание клиента MQTT
-WiFiClient wifiClient;
-PubSubClient mqttClient(wifiClient);
-mqttClient.setServer(mqttServer, mqttPort);
-mqttClient.setCredentials(mqttUsername, mqttPassword);
-
-
-void loop() {
-  if (LoRaWAN.joined()) {
-  int packetSize = LoRaWAN.receive(buffer, sizeof(buffer));
-  if (packetSize > 0) {
-    // Расшифровка данных
-    byte iv[CryptoAES::BLOCKSIZE];
-    memset(iv, 0, CryptoAES::BLOCKSIZE);
-    byte key[CryptoAES::BLOCKSIZE];
-    memcpy(key, APPKEY, CryptoAES::BLOCKSIZE);
-    CryptoAES aes(key, CryptoAES::BLOCKSIZE);
-    aes.decrypt(buffer + 4, packetSize - 4, iv);
-    // Обработка принятых данных
-    uint32_t devaddr = LoRaWAN.getDevAddr(buffer);
-    for (int i = 0; i < packetSize - 4; i++) {
-      Serial.print("Device ");
-      Serial.print(devaddr, HEX);
-      Serial.print(": ");
-      Serial.print((char)buffer[i + 4]);
-      Serial.println();
-
-      // Отправка данных в MQTT
-      char mqttTopic[50];
-      sprintf(mqttTopic, "device/%08X/data", devaddr);
-      char mqttPayload[256];
-      sprintf(mqttPayload, "%c", buffer[i + 4]);
-      mqttClient.publish(mqttTopic, mqttPayload);
-    }
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("
+void sendData() {
+  if (!LoRa.available()) {
+    return;
   }
-} else {
-  LoRaWAN.join();
-}
 
+  // Получаем данные от LoRa
+  String payload = "";
+
+  while (LoRa.available()) {
+    payload += (char)LoRa.read();
+  }
+
+  // Шифруем данные
+  byte key[16];
+  byte iv[16];
+  generateKeyAndIV(key, iv);
+  String encryptedPayload = encryptAES(payload, key, iv);
+
+  // Отправляем данные на MQTT брокер
+  if (mqtt.connected()) {
+    AsyncMqttClientMessageProperties properties;
+    properties.qos = 1;
+    properties.retain = false;
+    mqtt.publish("sensors/risk-agrosystem", 1, true, encryptedPayload.c_str(), encryptedPayload.length(), properties);
+  }
 }
